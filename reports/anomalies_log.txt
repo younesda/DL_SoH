@@ -1,0 +1,21 @@
+============================================================
+  ANOMALIES LOG — 2026-03-17 21:07:51
+============================================================
+
+[SoH_clip]
+  Clip appliqué à : 100.0
+  Rows affectées  : 140
+  Batteries       : ['B0036', 'B0006']
+  Détail par batterie :
+    B0006    — count=120, min=100.349, max=101.459
+    B0036    — count=20, min=122.012, max=122.012
+
+[Temperature_clip]
+  Clip appliqué à : 60.0
+  Rows affectées  : 160
+  Batteries       : ['B0032', 'B0038', 'B0030', 'B0031']
+  Détail par batterie :
+    B0030    — count=39, min=60.151, max=60.762
+    B0031    — count=39, min=60.245, max=60.623
+    B0032    — count=64, min=60.012, max=61.879
+    B0038    — count=18, min=60.083, max=66.672

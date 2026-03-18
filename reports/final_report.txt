@@ -1,0 +1,98 @@
+======================================================================
+  BATTERY SoH LSTM PROJECT — RAPPORT FINAL PHASE 3
+======================================================================
+
+1. OBJECTIF
+----------------------------------------------------------------------
+  Prédire le State of Health (SoH) de batteries Li-ion à partir
+  de mesures électriques et thermiques de décharge.
+  Données   : 24 batteries, 1 459 cycles, 29 180 mesures.
+  Split     : 19 batteries train / 5 batteries test (anti-leakage).
+  Approche  : fenêtres inter-cycles (10 cycles consécutifs × 11
+              features agrégées par cycle).
+
+2. PROGRESSION DES RUNS
+----------------------------------------------------------------------
+  Run   Architecture                            R²     MAE    Biais  Note
+  ---- ----------------------------------- ------ ------- --------  -------------------------
+  #3    LSTM(64) w=5 7feat                   0.708   3.393   -0.729  
+  #4    BiLSTM(64) w=5 7feat                 0.742   3.147   -0.622  
+  #5    BiLSTM(64) w=5 11feat                0.747   3.063   -0.538  
+  #6    BiLSTM(64) lite w=5 11feat           0.766   3.005   -0.487  
+  #7    BiLSTM(64) lite w=10 11feat  ★       0.787   2.834   -0.032  RETENU
+  #8    BiLSTM(128) w=10 11feat              0.727   2.940   -0.621  
+  #9    BiLSTM(64) lite w=10 12feat          0.763   2.973   -0.220  
+
+  Baseline Ridge window=5  : R²=0.707  MAE=3.507
+  Baseline Ridge window=10 : R²=0.671  MAE=3.537
+
+3. MODÈLE FINAL — Run #7
+----------------------------------------------------------------------
+  Fichier         : best_lstm_v7.pt
+  Architecture    : BiLSTM(64) -> Dropout(0.2) -> FC(32) -> FC(1)
+  Paramètres      : 43 585
+  Input shape     : (batch, 10 cycles, 11 features)
+  Features        : mean_V, std_V, min_V, mean_T, std_T, mean_I,
+                    slope_SoC, voltage_drop, capacity_proxy,
+                    temp_rise, voltage_end
+  Scaler          : StandardScaler fitté sur X_train uniquement
+
+  Métriques test (299 fenêtres, 5 batteries):
+    MAE   = 2.834 %   (baseline -0.673)
+    RMSE  = 3.565 %   (baseline -0.803)
+    R²    = 0.787     (baseline +0.080)
+    Biais = -0.032 %  (quasi-nul)
+    62.5% des prédictions dans ±3% d'erreur
+
+  Entraînement    : best epoch 69 / 150, early stop à 94
+  LR schedule     : 5e-4 -> 6.25e-5 (ReduceLROnPlateau)
+
+4. FEATURE IMPORTANCE (permutation, 30 répétitions)
+----------------------------------------------------------------------
+  min_V                        ΔR²=+0.3362  ΔMAE=+1.7401  [CRITIQUE]
+  mean_V                       ΔR²=+0.3308  ΔMAE=+1.6917  [CRITIQUE]
+  std_V                        ΔR²=+0.2851  ΔMAE=+1.4635  [CRITIQUE]
+  voltage_end                  ΔR²=+0.2651  ΔMAE=+1.3554  [CRITIQUE]
+  std_T                        ΔR²=+0.2210  ΔMAE=+1.0518  [CRITIQUE]
+  capacity_proxy               ΔR²=+0.1902  ΔMAE=+1.0709  [CRITIQUE]
+  temp_rise                    ΔR²=+0.0992  ΔMAE=+0.5471  [CRITIQUE]
+  mean_I                       ΔR²=+0.0191  ΔMAE=+0.1874  [MODERE]
+  voltage_drop                 ΔR²=+0.0138  ΔMAE=+0.0317  [MODERE]
+  mean_T                       ΔR²=+0.0138  ΔMAE=+0.1186  [MODERE]
+  slope_SoC                    ΔR²=-0.0033  ΔMAE=-0.0526  [faible]
+
+5. LIMITES CONNUES
+----------------------------------------------------------------------
+  a) Plafond y_pred ~91%
+     Le modèle ne prédit pas les SoH > 91%.
+     Cause : trop peu de fenêtres train avec SoH > 91%
+     (batteries B0046/B0047/B0048 très courtes, dégradation rapide).
+     Rééchantillonnage refusé : risque d'overfitting sur 2-3 batteries
+     spécifiques sans garantie de généralisation.
+
+  b) Dataset petit (944 samples train effectifs)
+     L'augmentation de capacité (Run #8, BiLSTM 128) a dégradé
+     les performances — signe de sous-régime de données.
+
+  c) Feature internal_resistance_proxy (Run #9)
+     r=-0.086 avec SoH, redondante avec voltage_drop.
+     Cause : mean_current quasi-constant dans ce protocole de
+     décharge — la division annule le signal de voltage_drop.
+
+  d) Généralisation hors-distribution
+     Le modèle est entraîné sur des protocoles NASA/CALCE.
+     Performances non garanties sur d'autres protocoles.
+
+6. FICHIERS LIVRÉS
+----------------------------------------------------------------------
+  best_lstm_v7.pt              Checkpoint modèle final
+  inference.py                 Script d'inférence production
+  model_config.json            Configuration complète du modèle
+  X_train_v4b.npy (944,10,11)  Tenseurs train normalisés
+  X_test_v4b.npy  (299,10,11)  Tenseurs test normalisés
+  metadata_v4b.json            Paramètres scaler + features
+  fig_report_runs_comparison.png
+  fig_report_residuals.png
+  fig_report_feature_importance.png
+
+======================================================================

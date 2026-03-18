@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+venv/
+
+# Large binary files — use Git LFS or exclude
+data/raw/*.csv
+data/processed/**/*.npy
+experiments/checkpoints/*.pt
+
+# Model checkpoint (keep final only via Git LFS)
+# model/best_lstm_v7.pt  ← tracked via LFS
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Claude
+.claude/

@@ -1,0 +1,4 @@
+run_id,architecture,batch_size,lr,epochs_run,best_val_loss,MAE_test,RMSE_test,R2_test,delta_MAE,delta_R2,bias,pred_range,notes
+13,BiLSTM(64)+Attn->Drop(0.2)->FC(32)->FC(1)         [12feat v7+soh_prev w=10],32,0.001,87,0.926876,1.5686,2.3684,0.9062,-1.9384,0.1992,-0.3559,70.01-93.31,OBJECTIF CIBLE ATTEINT
+14,BiLSTM(64)+Attn->Drop(0.3)->FC(32)->FC(1)         [12feat v8+soh_delta w=10],32,0.001,51,2.302328,2.6812,3.6623,0.7757,-0.8258,0.0687,-0.3106,68.16-88.40,Objectif minimum atteint
+15,BiLSTM(64)+Attn->Drop(0.2)->FC(32)->FC(1)         [12feat v7+soh_prev bat-holdout w=10],32,0.001,73,0.788445,1.7983,2.4576,0.899,-1.7087,0.192,0.478,71.33-92.32,OBJECTIF CIBLE ATTEINT

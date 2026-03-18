@@ -1,0 +1,88 @@
+{
+  "project": "Battery SoH LSTM",
+  "phase": "Phase 3 — Final",
+  "created_at": "2026-03-17",
+
+  "model": {
+    "run_id": 7,
+    "checkpoint": "best_lstm_v7.pt",
+    "architecture": "BiLSTM(64) -> Dropout(0.2) -> FC(32, relu) -> FC(1)",
+    "n_params": 43585,
+    "input_shape": [10, 11],
+    "output": "SoH (%)"
+  },
+
+  "features": {
+    "window_size": 10,
+    "n_features": 11,
+    "feature_names": [
+      "mean_V", "std_V", "min_V",
+      "mean_T", "std_T", "mean_I",
+      "slope_SoC",
+      "voltage_drop", "capacity_proxy", "temp_rise", "voltage_end"
+    ],
+    "aggregation": "per_cycle (20 bins/cycle, sorted SoC descending)",
+    "normalization": "StandardScaler fitted on train set only"
+  },
+
+  "scaler": {
+    "source": "metadata_v4b.json",
+    "mean": [3.455209, 0.211122, 2.959141, 35.353778, 3.572107,
+             -2.377875, -5.04343, 0.953434, 47.557506, 13.334483, 2.959141],
+    "scale": [0.137981, 0.016435, 0.100888, 9.773384, 1.532175,
+              0.938854, 0.041609, 0.071528, 18.777078, 5.201917, 0.100888]
+  },
+
+  "training": {
+    "optimizer": "Adam",
+    "lr_initial": 0.0005,
+    "lr_scheduler": "ReduceLROnPlateau(factor=0.5, patience=10, min_lr=1e-5)",
+    "batch_size": 32,
+    "max_epochs": 150,
+    "early_stopping_patience": 25,
+    "best_epoch": 69,
+    "gradient_clipping": "max_norm=1.0",
+    "val_strategy": "temporal split (last 20% cycles per battery)",
+    "best_val_loss_mse": 9.2873
+  },
+
+  "data_split": {
+    "train_batteries": [
+      "B0005","B0007","B0025","B0026","B0027","B0029","B0030","B0031",
+      "B0032","B0033","B0036","B0038","B0040","B0042","B0043","B0044",
+      "B0046","B0047","B0048"
+    ],
+    "test_batteries": ["B0006","B0018","B0028","B0034","B0039"],
+    "n_train_windows": 944,
+    "n_test_windows": 299
+  },
+
+  "performance": {
+    "MAE_test_pct": 2.834,
+    "RMSE_test_pct": 3.565,
+    "R2_test": 0.787,
+    "bias_test_pct": -0.032,
+    "y_pred_range": [69.24, 90.91],
+    "y_test_range": [70.12, 98.67],
+    "pct_within_3pct_error": null
+  },
+
+  "baselines": {
+    "ridge_window5":  {"MAE": 3.507, "RMSE": 4.368, "R2": 0.707},
+    "ridge_window10": {"MAE": 3.537, "RMSE": 4.434, "R2": 0.671}
+  },
+
+  "known_limitations": [
+    "SoH ceiling ~91%: model does not predict SoH > 91% (structural — insufficient high-SoH training windows)",
+    "Trained on NASA/CALCE protocol — performance on other protocols not guaranteed",
+    "Small dataset (944 effective train samples) — larger BiLSTM(128) degraded performance"
+  ],
+
+  "inference": {
+    "script": "inference.py",
+    "class": "SoHPredictor",
+    "input_normalized": "predictor.predict(X)      # X shape (10,11) or (N,10,11)",
+    "input_raw":        "predictor.predict_raw(X)   # applies scaler automatically",
+    "cli": "python inference.py --input data.npy [--raw] [--output preds.npy]"
+  }
+}
