@@ -5,13 +5,12 @@ __pycache__/
 .env
 venv/
 
-# Large binary files — use Git LFS or exclude
-data/raw/*.csv
+# Large binary files
 data/processed/**/*.npy
 experiments/checkpoints/*.pt
 
-# Model checkpoint (keep final only via Git LFS)
-# model/best_lstm_v7.pt  ← tracked via LFS
+# Model final — inclus dans le repo (< 1 MB)
+# model/best_lstm_v13.pt  ← versionné directement
 
 # IDE / OS
 .vscode/

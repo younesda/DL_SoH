@@ -14,6 +14,7 @@ Note Colab : Streamlit nécessite un tunnel pour fonctionner sur Colab.
     print(ngrok.connect(8501))
 """
 
+import json
 import math
 from pathlib import Path
 
@@ -28,34 +29,38 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.preprocessing import StandardScaler
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Config
+# Config — chargée depuis model_config.json
 # ─────────────────────────────────────────────────────────────────────────────
-ROOT           = Path(__file__).resolve().parent
+ROOT        = Path(__file__).resolve().parent
+CONFIG_PATH = ROOT / "model" / "model_config.json"
+
+with open(CONFIG_PATH, encoding="utf-8") as f:
+    CFG = json.load(f)
+
+RUN_ID         = CFG["model"]["run_id"]
+CHECKPOINT     = ROOT / "model" / CFG["model"]["checkpoint"]
+ARCH_DESC      = CFG["model"]["architecture"]
+N_PARAMS       = CFG["model"]["n_params"]
+WINDOW_SIZE    = CFG["features"]["window_size"]
+N_FEATURES     = CFG["features"]["n_features"]
+ALL_FEATURES   = CFG["features"]["feature_names"]          # 12 features (incl. soh_prev)
+ELEC_FEATURES  = ALL_FEATURES[:-1]                         # 11 features électriques
+TRAIN_BATTERIES = CFG["data_split"]["train_batteries"]
+TEST_BATTERIES  = CFG["data_split"]["test_batteries"]
+BASELINE        = {
+    "MAE":  CFG["baselines"]["ridge_inter_cycle"]["MAE"],
+    "RMSE": CFG["baselines"]["ridge_inter_cycle"]["RMSE"],
+    "R2":   CFG["baselines"]["ridge_inter_cycle"]["R2"],
+}
+
 DATA_PATH      = ROOT / "data" / "raw" / "battery_health_dataset.csv"
-CHECKPOINT     = ROOT / "model" / "best_lstm_v13.pt"
-LOG_CSV        = ROOT / "experiments" / "training_logs" / "training_log_v13.csv"
+LOG_CSV        = ROOT / "experiments" / "training_logs" / f"training_log_v{RUN_ID}.csv"
 
 BINS_PER_CYCLE = 20
-WINDOW_SIZE    = 10
 SOH_CLIP       = 100.0
 TEMP_CLIP      = 60.0
 
-TRAIN_BATTERIES = [
-    "B0005","B0007","B0025","B0026","B0027","B0029","B0030","B0031",
-    "B0032","B0033","B0036","B0038","B0040","B0042","B0043","B0044",
-    "B0046","B0047","B0048",
-]
-TEST_BATTERIES = ["B0006", "B0018", "B0028", "B0034", "B0039"]
-
-ELEC_FEATURES = [
-    "mean_V","std_V","min_V","mean_T","std_T","mean_I",
-    "slope_SoC","voltage_drop","capacity_proxy","temp_rise","voltage_end",
-]
-
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-# Résultats de référence (baseline Ridge inter-cycle)
-BASELINE = {"MAE": 3.507, "RMSE": 4.368, "R2": 0.707}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Modèle — identique à LSTMv11 dans train_lstm.py
@@ -203,7 +208,7 @@ def load_data():
 
 @st.cache_resource
 def load_model():
-    model = BiLSTMAttention(input_size=12).to(DEVICE)
+    model = BiLSTMAttention(input_size=N_FEATURES).to(DEVICE)
     ckpt  = torch.load(CHECKPOINT, map_location=DEVICE)
     model.load_state_dict(ckpt["model_state"])
     model.eval()
@@ -240,7 +245,7 @@ if not DATA_PATH.exists():
     st.error(f"Données introuvables : `{DATA_PATH}`")
     st.stop()
 if not CHECKPOINT.exists():
-    st.error(f"Checkpoint introuvable : `{CHECKPOINT}`\nLancez : `python src/training/train_lstm.py --run 13`")
+    st.error(f"Checkpoint introuvable : `{CHECKPOINT}`\nLancez : `python src/training/train_lstm.py --run {RUN_ID}`")
     st.stop()
 
 with st.spinner("Chargement des données et du modèle..."):
@@ -260,7 +265,7 @@ residuals   = y_pred - y_test
 # Header
 # ─────────────────────────────────────────────────────────────────────────────
 st.title("🔋 Battery State of Health — Dashboard")
-st.caption("BiLSTM + Attention | Run #13 | soh_prev feature | Battery-wise split")
+st.caption(f"Run #{RUN_ID} | {ARCH_DESC} | {N_FEATURES} features (soh_prev) | Battery-wise split")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Sidebar
@@ -276,6 +281,10 @@ with st.sidebar:
     st.divider()
     st.markdown("**Modèle**")
     st.code(CHECKPOINT.name, language=None)
+    st.markdown(f"**Run** : #{RUN_ID}")
+    st.markdown(f"**Architecture** : `{ARCH_DESC}`")
+    st.markdown(f"**Paramètres** : {N_PARAMS:,}")
+    st.markdown(f"**Features** : {N_FEATURES} (`soh_prev` inclus)")
     st.markdown(f"**Device** : `{DEVICE}`")
     st.markdown(f"**Train** : {len(TRAIN_BATTERIES)} batteries · {len(y_train)} fenêtres")
     st.markdown(f"**Test**  : {len(TEST_BATTERIES)} batteries · {len(y_test)} fenêtres")
@@ -347,15 +356,15 @@ if page == "📊 Métriques globales":
 
     # Tableau comparatif des approches
     st.subheader("Comparaison des approches")
+    bl = CFG["baselines"]
     comp = pd.DataFrame([
-        {"Approche": "Baseline Ridge inter-cycle",        "Fenêtre": "—",        "Features": 11, "MAE (%)": 3.507, "RMSE (%)": 4.368, "R²": 0.707},
-        {"Approche": "LSTM intra-cycle (sujet)",          "Fenêtre": "3 bins",   "Features":  5, "MAE (%)": "~4.5","RMSE (%)": "~5.8","R²": "~0.40"},
-        {"Approche": "BiLSTM (Run #7)",                   "Fenêtre": "10 cyc",   "Features": 11, "MAE (%)": 2.834, "RMSE (%)": 3.712, "R²": 0.788},
-        {"Approche": "BiLSTM + Attention (Run #11)",      "Fenêtre": "10 cyc",   "Features": 11, "MAE (%)": 2.728, "RMSE (%)": 3.601, "R²": 0.777},
-        {"Approche": "BiLSTM + Attention + soh_prev ★",  "Fenêtre": "10 cyc",   "Features": 12, "MAE (%)": round(mae_global,3), "RMSE (%)": round(rmse_global,3), "R²": round(r2_global,4)},
+        {"Approche": "Baseline Ridge inter-cycle",       "Fenêtre": "—",      "Features": 11, "MAE (%)": bl["ridge_inter_cycle"]["MAE"],  "RMSE (%)": bl["ridge_inter_cycle"]["RMSE"],  "R²": bl["ridge_inter_cycle"]["R2"]},
+        {"Approche": "LSTM intra-cycle (sujet)",         "Fenêtre": "3 bins", "Features":  5, "MAE (%)": bl["lstm_intra_cycle"]["MAE"],   "RMSE (%)": bl["lstm_intra_cycle"]["RMSE"],   "R²": bl["lstm_intra_cycle"]["R2"]},
+        {"Approche": "BiLSTM Run #7",                    "Fenêtre": "10 cyc", "Features": 11, "MAE (%)": bl["bilstm_run7"]["MAE"],        "RMSE (%)": bl["bilstm_run7"]["RMSE"],        "R²": bl["bilstm_run7"]["R2"]},
+        {"Approche": f"★ Run #{RUN_ID} — {ARCH_DESC}",  "Fenêtre": "10 cyc", "Features": N_FEATURES, "MAE (%)": round(mae_global, 3), "RMSE (%)": round(rmse_global, 3), "R²": round(r2_global, 4)},
     ])
     st.dataframe(comp, width="stretch", hide_index=True)
-    st.caption("★ Run #13 — modèle chargé dans ce dashboard")
+    st.caption(f"★ Run #{RUN_ID} — modèle chargé dans ce dashboard ({CFG['model']['checkpoint']})")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -445,7 +454,7 @@ elif page == "📈 Courbes d'apprentissage":
 
     if log_df is None:
         st.warning(f"Fichier de log introuvable : `{LOG_CSV}`")
-        st.info("Lancez d'abord : `python src/training/train_lstm.py --run 13`")
+        st.info(f"Lancez d'abord : `python src/training/train_lstm.py --run {RUN_ID}`")
         st.stop()
 
     best_ep   = int(log_df.loc[log_df["val_loss"].idxmin(), "epoch"])
@@ -486,8 +495,9 @@ elif page == "📈 Courbes d'apprentissage":
                                  name="Val loss", line=dict(color="#e07b6a", width=2)))
         fig.add_vline(x=best_ep, line_dash="dot", line_color="green",
                       annotation_text=f"Époque #{best_ep}", annotation_position="top right")
-        fig.update_layout(title="Huber Loss train / validation", xaxis_title="Époque",
-                          yaxis_title="Huber Loss", height=380)
+        loss_name = CFG["training"]["loss"]
+        fig.update_layout(title=f"{loss_name} — train / validation", xaxis_title="Époque",
+                          yaxis_title="Loss", height=380)
         st.plotly_chart(fig, width="stretch")
 
     fig = go.Figure(go.Scatter(x=log_df["epoch"], y=log_df["lr"],
@@ -495,7 +505,7 @@ elif page == "📈 Courbes d'apprentissage":
                                name="Learning rate"))
     fig.add_vline(x=best_ep, line_dash="dot", line_color="green",
                   annotation_text=f"Époque #{best_ep}", annotation_position="top right")
-    fig.update_layout(title="Learning Rate schedule (ReduceLROnPlateau — factor=0.5, patience=10)",
+    fig.update_layout(title=f"Learning Rate schedule ({CFG['training']['lr_scheduler']})",
                       xaxis_title="Époque", yaxis_title="LR",
                       yaxis_type="log", height=300)
     st.plotly_chart(fig, width="stretch")
@@ -511,7 +521,7 @@ elif page == "📈 Courbes d'apprentissage":
 # ═════════════════════════════════════════════════════════════════════════════
 elif page == "🎯 Prédiction interactive":
 
-    st.subheader("Prédire le SoH à partir d'une fenêtre de 10 cycles")
+    st.subheader(f"Prédire le SoH à partir d'une fenêtre de {WINDOW_SIZE} cycles")
 
     # ── Choix batterie avec distinction train/test ────────────────────────────
     col_cfg, col_viz = st.columns([1, 2])
@@ -578,7 +588,7 @@ elif page == "🎯 Prédiction interactive":
         with st.expander("Détail des features de la fenêtre"):
             df_win = pd.DataFrame(elec_w, columns=ELEC_FEATURES)
             df_win.insert(0, "Cycle", window_cycles)
-            df_win["soh_prev"] = soh_prev
+            df_win[ALL_FEATURES[-1]] = soh_prev
             df_win["SoH réel"] = soh_w
             st.dataframe(df_win.round(4), width="stretch", hide_index=True)
 
