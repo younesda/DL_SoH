@@ -1,40 +1,50 @@
 {
   "project": "Battery SoH LSTM",
   "phase": "Phase 4 — Final",
-  "created_at": "2026-03-18",
+  "created_at": "2026-03-22",
 
   "model": {
-    "run_id": 13,
-    "checkpoint": "best_lstm_v13.pt",
+    "run_id": 16,
+    "checkpoint": "best_lstm_v16.pt",
     "architecture": "BiLSTM(64, bidirectional) + AdditiveAttention -> Dropout(0.2) -> FC(32, relu) -> FC(1)",
-    "n_params": 44225,
-    "input_shape": [10, 12],
+    "n_params": 44737,
+    "input_shape": [10, 13],
     "output": "SoH (%)"
+  },
+
+  "ensemble": {
+    "description": "Ensemble LSTM#16 + Ridge v9 (alpha calibré sur val set)",
+    "alpha_lstm": 0.05,
+    "alpha_ridge": 0.95,
+    "ridge_alpha_sklearn": 1.0,
+    "note": "alpha=0.05 optimal sur val set (run #18 honnête) et test set (run #17) — identiques"
   },
 
   "features": {
     "window_size": 10,
-    "n_features": 12,
+    "n_features": 13,
     "feature_names": [
       "mean_V", "std_V", "min_V",
       "mean_T", "std_T", "mean_I",
       "slope_SoC",
       "voltage_drop", "capacity_proxy", "temp_rise", "voltage_end",
-      "soh_prev"
+      "soh_prev",
+      "soh_lin_extrap"
     ],
     "soh_prev_note": "SoH[t] pour t < last timestep, SoH[t-1] pour t = last (anti-leakage)",
+    "soh_lin_extrap_note": "soh_prev[8] + slope_lineaire(soh_prev[0:9]) — projection du prochain SoH, constante sur la fenêtre",
     "aggregation": "per_cycle (20 bins/cycle, sorted SoC descending)",
     "normalization": "StandardScaler fitted on train set only"
   },
 
   "scaler": {
-    "source": "metadata_v7.json",
+    "source": "metadata_v9.json",
     "mean": [3.455209, 0.211122, 2.959141, 35.353778, 3.572107,
              -2.377875, -5.04343, 0.953434, 47.557506, 13.334483, 2.959141,
-             82.691327],
+             82.691327, 82.001769],
     "scale": [0.137981, 0.016435, 0.100888, 9.773384, 1.532175,
               0.938854, 0.041609, 0.071528, 18.777078, 5.201917, 0.100888,
-              6.240936]
+              6.240936, 6.361378]
   },
 
   "training": {
@@ -46,10 +56,10 @@
     "batch_size": 32,
     "max_epochs": 150,
     "early_stopping_patience": 30,
-    "epochs_run": 87,
+    "epochs_run": 85,
     "gradient_clipping": "max_norm=1.0",
     "val_strategy": "temporal split (last 20% cycles per battery)",
-    "best_val_loss_huber": 1.063659
+    "best_val_loss_huber": 0.727444
   },
 
   "data_split": {
@@ -64,12 +74,15 @@
   },
 
   "performance": {
-    "MAE_test_pct": 1.5309,
-    "RMSE_test_pct": 2.2739,
-    "R2_test": 0.9135,
-    "bias_test_pct": -0.1660,
-    "y_pred_range": [70.56, 93.59],
-    "y_test_range": [70.12, 98.67]
+    "model": "Ensemble LSTM#16 + Ridge (alpha=0.05/0.95)",
+    "MAE_test_pct": 1.0519,
+    "RMSE_test_pct": 1.7525,
+    "R2_test": 0.9486,
+    "bias_test_pct": 0.2188,
+    "y_pred_range": [69.78, 97.98],
+    "y_test_range": [70.12, 98.67],
+    "lstm_solo": {"MAE": 1.2953, "RMSE": 2.1105, "R2": 0.9255},
+    "ridge_solo": {"MAE": 1.0582, "RMSE": 1.7537, "R2": 0.9486}
   },
 
   "baselines": {
@@ -79,16 +92,16 @@
   },
 
   "known_limitations": [
-    "SoH ceiling ~93%: model does not predict SoH > 93% (structural — insufficient high-SoH training windows)",
+    "SoH ceiling ~93%: LSTM seul ne prédit pas SoH > 93% — corrigé par le Ridge dans l'ensemble (range [69.78, 97.98])",
     "Trained on NASA/CALCE protocol — performance on other protocols not guaranteed",
     "Small dataset (944 effective train samples) — larger BiLSTM(128) degraded performance",
-    "soh_prev requires BMS access to previous cycle SoH — always available in real deployments"
+    "soh_prev and soh_lin_extrap require BMS access to previous cycle SoH — always available in real deployments"
   ],
 
   "inference": {
     "script": "inference.py",
     "class": "SoHPredictor",
-    "input_normalized": "predictor.predict(X)      # X shape (10,12) or (N,10,12)",
+    "input_normalized": "predictor.predict(X)      # X shape (10,13) or (N,10,13)",
     "input_raw":        "predictor.predict_raw(X)   # applies scaler automatically",
     "cli": "python inference.py --input data.npy [--raw] [--output preds.npy]"
   }

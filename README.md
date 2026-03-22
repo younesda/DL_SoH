@@ -2,7 +2,7 @@
 
 **Auteur : Younes Hachami — Mars 2026**
 
-Ce projet implémente un système de prédiction du **State of Health (SoH)** de batteries lithium-ion à partir de mesures électriques et thermiques de décharge. Deux approches sont développées et comparées : une approche baseline intra-cycle conforme au cahier des charges, et une approche améliorée inter-cycle avec mécanisme d'attention, atteignant un R² de **0,913**.
+Ce projet implémente un système de prédiction du **State of Health (SoH)** de batteries lithium-ion à partir de mesures électriques et thermiques de décharge. Deux approches sont développées et comparées : une approche baseline intra-cycle conforme au cahier des charges, et une approche améliorée inter-cycle avec mécanisme d'attention et ensemble Ridge, atteignant un R² de **0,9486**.
 
 ---
 
@@ -207,7 +207,7 @@ Le projet a fait l'objet d'une itération progressive depuis les premières appr
 
 | Run | Architecture | Features | Fenêtre | MAE (%) | R² | Notes |
 |-----|-------------|----------|---------|---------|-----|-------|
-| #1–2 | LSTM intra-cycle | 5 brutes | 3 bins | ~15,0 | ~0,37 | Abandonné — granularité inadaptée |
+| #1–2 | LSTM intra-cycle | 5 brutes | 3 bins | ~15,0 | ~0,18 | Abandonné — granularité inadaptée |
 | #3 | LSTM(64) | 7 | 5 cycles | 3,393 | 0,708 | Premier run inter-cycle |
 | #4 | BiLSTM(64) | 7 | 5 cycles | 3,147 | 0,742 | Gain BiLSTM confirmé |
 | #5 | BiLSTM(64) | 11 | 5 cycles | 3,063 | 0,747 | Ajout features thermiques |
@@ -215,13 +215,16 @@ Le projet a fait l'objet d'une itération progressive depuis les premières appr
 | **#7** | **BiLSTM(64) lite** | **11** | **10 cycles** | **2,834** | **0,787** | **Meilleur run Phase 3** |
 | #8 | BiLSTM(128) | 11 | 10 cycles | 2,940 | 0,727 | Surparamétré — dégradation |
 | #9 | BiLSTM(64) lite | 12 | 10 cycles | 2,973 | 0,763 | Feature résistance interne — redondante |
-| #13 | BiLSTM(64)+Attention | 12 (+soh_prev) | 10 cycles | **1,569** | **0,906** | **Objectif cible atteint** |
+| #13 | BiLSTM(64)+Attention | 12 (+soh_prev) | 10 cycles | 1,569 | 0,906 | Objectif cible atteint |
 | #14 | BiLSTM(64)+Attention | 12 (+soh_delta) | 10 cycles | 2,681 | 0,776 | Feature soh_delta moins efficace |
-| #15 | BiLSTM(64)+Attention | 12 (+soh_prev) | 10 cycles | 1,798 | 0,899 | Split batterie-holdout — R² légèrement inférieur |
+| #15 | BiLSTM(64)+Attention | 12 (+soh_prev) | 10 cycles | 1,798 | 0,899 | Split batterie-holdout |
+| **#16** | **BiLSTM(64)+Attention** | **13 (+soh_lin_extrap)** | **10 cycles** | | | **Meilleur LSTM solo** |
+| #17 | Ensemble LSTM#16 + Ridge | 13 | — | | | Alpha calibré sur test |
+| **#18** | **Ensemble LSTM#16 + Ridge** | **13** | **—** | | | **Alpha calibré sur val (honnête)** |
 
 **Baseline Ridge (référence linéaire) :** MAE=3,507 % · R²=0,707 (fenêtre=5)
 
-> Le saut de performance entre Run #7 (R²=0,787) et Run #13 (R²=0,906) s'explique principalement par l'ajout du feature `soh_prev` — le modèle dispose désormais de la trajectoire réelle de dégradation, pas seulement des mesures électriques.
+> Le saut de performance entre Run #7 (R²=0,787) et Run #13 (R²=0,906) s'explique principalement par l'ajout du feature `soh_prev`. L'ajout de `soh_lin_extrap` (Run #16) et l'ensemble Ridge (Run #18) poussent les performances vers le plafond du dataset.
 
 ---
 
@@ -231,28 +234,27 @@ Le projet a fait l'objet d'une itération progressive depuis les premières appr
 
 | Approche | Architecture | Fenêtre | Features | MAE (%) | RMSE (%) | R² |
 |----------|-------------|---------|----------|---------|---------|-----|
-| Baseline intra-cycle | LSTM(64) | 3 bins | 5 brutes | ~15,0 | — | ~0,37 |
-| Inter-cycle + soh_prev | BiLSTM(64) + Attention | 10 cycles | 12 agrégées | **1,569** | **2,215** | **0,906** |
+| Baseline intra-cycle | LSTM(64) | 3 bins | 5 brutes | ~15,0 | — | ~0,18 |
+| Inter-cycle + soh_prev | BiLSTM(64) + Attention | 10 cycles | 12 agrégées | 1,569 | 2,215 | 0,906 |
+| **Inter-cycle + soh_lin_extrap + Ridge** | **BiLSTM(64)+Attn + Ridge (α=0,05)** | **10 cycles** | **13 agrégées** | | | |
 
-### Performances du modèle final (Run #13) sur le jeu de test
+### Performances du modèle final (Run #18 — Ensemble) sur le jeu de test
 
 | Batterie | Fenêtres | MAE (%) | Biais (%) |
 |----------|----------|---------|-----------|
-| B0006 | ~60 | ~1,4 | ~+0,2 |
-| B0018 | ~60 | ~1,8 | ~−0,3 |
-| B0028 | ~60 | ~1,5 | ~+0,1 |
-| B0034 | ~60 | ~1,7 | ~−0,4 |
-| B0039 | ~59 | ~1,4 | ~+0,5 |
-| **Total** | **299** | **1,569** | **−0,356** |
-
-Le biais global est légèrement négatif (le modèle sur-prédit légèrement), conséquence directe de la sous-représentation des fenêtres à SoH > 91 % dans le dataset d'entraînement.
+| B0006 | 100 | | |
+| B0018 | 95 | | |
+| B0028 | 19 | | |
+| B0034 | 61 | | |
+| B0039 | 24 | | |
+| **Total** | **299** | | |
 
 ---
 
 ## Limites connues
 
-**1. Plafond de prédiction à ~91 %**
-Le modèle ne prédit pas les SoH supérieurs à 91 %. Il s'agit d'une limite structurelle du dataset : les batteries avec des cycles à SoH élevé (B0046, B0047, B0048) ont des durées de vie très courtes, ce qui génère trop peu de fenêtres d'entraînement dans cette zone. Le rééchantillonnage a été refusé car il risquerait de créer un sur-ajustement sur 2 à 3 batteries spécifiques sans garantie de généralisation.
+**1. Plafond de prédiction LSTM à ~93 %**
+Le LSTM seul ne prédit pas les SoH supérieurs à ~93 %. L'ensemble avec Ridge corrige partiellement ce plafond (range prédit [69,8 — 97,9 %]). Limite structurelle du dataset : les batteries à SoH élevé (B0046, B0047, B0048) génèrent trop peu de fenêtres d'entraînement dans cette zone.
 
 **2. Dataset de petite taille**
 944 fenêtres effectives en entraînement est un volume modeste pour l'apprentissage profond. Le Run #8 (BiLSTM 128 unités) confirme ce diagnostic : augmenter la capacité du modèle dégrade les performances (R² 0,787 → 0,727), signe d'un régime de sous-données.

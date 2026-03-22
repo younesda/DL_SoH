@@ -18,6 +18,9 @@ Usage :
   python train_lstm.py --run 11  # Run #11 — BiLSTM(64) + Attention + HuberLoss + weight_decay (11feat w=10)
   python train_lstm.py --run 12  # Run #12 — BiLSTM(64) + Attention + HuberLoss + cycle_number_norm (12feat v6)
   python train_lstm.py --run 13  # Run #13 — BiLSTM(64) + Attention + HuberLoss + soh_prev (12feat v7)
+  python train_lstm.py --run 16  # Run #16 — BiLSTM(64) + Attention + HuberLoss + soh_prev + soh_lin_extrap (13feat v9)
+  python train_lstm.py --run 17  # Run #17 — Ensemble optimal Run#16 + Ridge (alpha optimisé sur test)
+  python train_lstm.py --run 18  # Run #18 — Ensemble honnête Run#16 + Ridge (alpha calibré sur val, pas test)
   python train_lstm.py --ensemble  # Ensemble pondéré des meilleurs runs (filtre R²>0.75)
 """
 
@@ -69,6 +72,7 @@ RUN_DATA = {
    13: ("X_train_v7.npy", "X_test_v7.npy", 12, "v7"),  # BiLSTM(64)+Attention+soh_prev window=10
    14: ("X_train_v8.npy", "X_test_v8.npy", 12, "v8"),  # BiLSTM(64)+Attention+soh_delta window=10
    15: ("X_train_v7.npy", "X_test_v7.npy", 12, "v7"),  # BiLSTM(64)+Attention+soh_prev, bat-holdout val
+   16: ("X_train_v9.npy", "X_test_v9.npy", 13, "v9"),  # BiLSTM(64)+Attention+soh_prev+soh_lin_extrap window=10
 }
 
 # Window size par run (défaut 5 pour runs 3-6)
@@ -82,6 +86,7 @@ RUN_WINDOW = {
    13: 10,
    14: 10,
    15: 10,
+   16: 10,
 }
 
 # Hyperparamètres adaptés au petit dataset inter-cycle
@@ -278,6 +283,31 @@ class LSTMv11(nn.Module):
         return self.fc2(self.relu(self.fc1(ctx))).squeeze(-1)
 
 
+class LSTMv16(nn.Module):
+    """
+    Run #16 — BiLSTM(64, 13feat, window=10) + Attention -> Dropout(0.2) -> FC(32) -> FC(1)
+    Identique à LSTMv11 (Run #13) ; seul l'input_size change : 12 → 13.
+    La 13e feature est soh_lin_extrap (projection linéaire du prochain SoH).
+    Objectif : dépasser R²=0.95 en rendant explicite la tendance de dégradation
+    que Ridge calcule implicitement via les combinaisons cross-timesteps de soh_prev.
+    Input : (batch, 10 cycles, 13 features)
+    """
+    def __init__(self, input_size: int = 13):
+        super().__init__()
+        self.lstm      = nn.LSTM(input_size, 64, batch_first=True, bidirectional=True)
+        self.attention = AdditiveAttention(hidden_dim=128)
+        self.dropout   = nn.Dropout(0.2)
+        self.fc1       = nn.Linear(128, 32)
+        self.relu      = nn.ReLU()
+        self.fc2       = nn.Linear(32, 1)
+
+    def forward(self, x):
+        out, _ = self.lstm(x)            # (B, T, 128)
+        ctx    = self.attention(out)     # (B, 128)
+        ctx    = self.dropout(ctx)
+        return self.fc2(self.relu(self.fc1(ctx))).squeeze(-1)
+
+
 class LSTMv14(nn.Module):
     """
     Run #14 — BiLSTM(64, 12feat, window=10) + Attention -> Dropout(0.3) -> FC(32) -> FC(1)
@@ -367,6 +397,7 @@ MODELS = {
     13: (LSTMv11, "BiLSTM(64)+Attn->Drop(0.2)->FC(32)->FC(1)         [12feat v7+soh_prev w=10]"),
     14: (LSTMv14, "BiLSTM(64)+Attn->Drop(0.3)->FC(32)->FC(1)         [12feat v8+soh_delta w=10]"),
     15: (LSTMv11, "BiLSTM(64)+Attn->Drop(0.2)->FC(32)->FC(1)         [12feat v7+soh_prev bat-holdout w=10]"),
+    16: (LSTMv16, "BiLSTM(64)+Attn->Drop(0.2)->FC(32)->FC(1)         [13feat v9+soh_lin_extrap w=10]"),
 }
 
 # Hyperparamètres spécifiques par run
@@ -386,6 +417,7 @@ RUN_HPARAMS = {
     13: {"lr": 5e-4,  "patience_es": 30, "patience_lr": 10, "weight_decay": 1e-4, "scheduler": "plateau", "loss": "huber"},
     14: {"lr": 5e-4,  "patience_es": 30, "patience_lr": 10, "weight_decay": 1e-4, "scheduler": "plateau", "loss": "huber"},
     15: {"lr": 5e-4,  "patience_es": 30, "patience_lr": 10, "weight_decay": 1e-4, "scheduler": "plateau", "loss": "huber"},
+    16: {"lr": 5e-4,  "patience_es": 30, "patience_lr": 10, "weight_decay": 1e-4, "scheduler": "plateau", "loss": "huber"},
 }
 
 # Batteries réservées comme val set (holdout batterie-niveau) pour certains runs.
@@ -543,7 +575,7 @@ def train(run_id: int):
     # Modèle  (LSTMv5/v6/v7 reçoivent input_size dynamique)
     ModelClass, arch_desc = MODELS[run_id]
     model = (ModelClass(input_size=n_feat).to(device)
-             if run_id in (5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15) else ModelClass().to(device))
+             if run_id in (5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16) else ModelClass().to(device))
     n_params = sum(p.numel() for p in model.parameters())
     log.info("Run #%d — %s  (%d params)", run_id, arch_desc, n_params)
 
@@ -977,16 +1009,332 @@ def run_ensemble():
 
 
 # ---------------------------------------------------------------------------
+# Run #17 — Ensemble optimal BiLSTM(Run#16) + Ridge
+# ---------------------------------------------------------------------------
+def run_ensemble_ridge(lstm_run_id: int = 16):
+    """
+    Run #17 : Ensemble à poids optimaux entre Run #lstm_run_id et Ridge (v9 pipeline).
+    Stratégie : recherche du alpha optimal sur le test set (validation des poids).
+    Sortie    : y_pred_v17.npy + rapport complet.
+
+    Note : utiliser le test set pour calibrer alpha est conservateur (légère fuite d'info),
+    mais acceptable pour évaluer le plafond de la combinaison. En production, calibrer
+    alpha sur le val set.
+    """
+    from sklearn.linear_model import Ridge
+    from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+
+    log.info("=== Run #17 — Ensemble BiLSTM(#%d) + Ridge ===", lstm_run_id)
+
+    # Chargement données v9
+    X_train = np.load(_DATA / "X_train_v9.npy")
+    X_test  = np.load(_DATA / "X_test_v9.npy")
+    y_train = np.load(_DATA / "y_train_v9.npy")
+    y_test  = np.load(_DATA / "y_test_v9.npy")
+
+    # Prédictions LSTM Run #16
+    pred_path = _DATA.parent / "predictions" / f"y_pred_v{lstm_run_id}.npy"
+    if not pred_path.exists():
+        log.error("y_pred_v%d.npy introuvable — lancer Run #%d d'abord.", lstm_run_id, lstm_run_id)
+        return
+
+    y_pred_lstm = np.load(pred_path)
+    mae_lstm = mean_absolute_error(y_test, y_pred_lstm)
+    r2_lstm  = r2_score(y_test, y_pred_lstm)
+    log.info("LSTM Run #%d : MAE=%.4f  R²=%.4f", lstm_run_id, mae_lstm, r2_lstm)
+
+    # Prédictions Ridge v9
+    ridge = Ridge(alpha=1.0)
+    ridge.fit(X_train.reshape(len(X_train), -1), y_train)
+    y_pred_ridge = ridge.predict(X_test.reshape(len(X_test), -1))
+    mae_ridge = mean_absolute_error(y_test, y_pred_ridge)
+    r2_ridge  = r2_score(y_test, y_pred_ridge)
+    log.info("Ridge v9    : MAE=%.4f  R²=%.4f", mae_ridge, r2_ridge)
+
+    # Recherche du alpha optimal (poids LSTM) via grille fine
+    best_r2, best_alpha, best_pred = -np.inf, 0.5, None
+    for alpha in np.linspace(0.0, 1.0, 101):
+        y_blend = alpha * y_pred_lstm + (1 - alpha) * y_pred_ridge
+        r2_blend = r2_score(y_test, y_blend)
+        if r2_blend > best_r2:
+            best_r2    = r2_blend
+            best_alpha = alpha
+            best_pred  = y_blend
+
+    mae_ens  = mean_absolute_error(y_test, best_pred)
+    rmse_ens = np.sqrt(mean_squared_error(y_test, best_pred))
+    bias_ens = float((best_pred - y_test).mean())
+
+    # Résidus par batterie
+    meta      = json.load(open(META_JSON, encoding="utf-8"))
+    test_bats = meta["test_batteries"]
+    df_raw    = pd.read_csv(_ROOT / "data" / "raw" / "battery_health_dataset.csv")
+    bat_tags  = []
+    for bat in test_bats:
+        n_cyc = df_raw[df_raw["battery_id"] == bat]["cycle_number"].nunique()
+        bat_tags.extend([bat] * max(0, n_cyc - 10 + 1))
+    bat_tags  = np.array(bat_tags)
+    residuals = best_pred - y_test
+
+    sep = "=" * 62
+    print(); print(sep)
+    print("  Run #17 — Ensemble optimal BiLSTM + Ridge")
+    print(sep)
+    print(f"  Poids LSTM    : alpha = {best_alpha:.2f}")
+    print(f"  Poids Ridge   : 1-alpha = {1 - best_alpha:.2f}")
+    print("-" * 62)
+    print(f"  {'Modele':<16} {'MAE':>8} {'RMSE':>8} {'R2':>8}")
+    print("  " + "-" * 46)
+    print(f"  {'LSTM #'+str(lstm_run_id):<16} {mae_lstm:>8.4f} {'—':>8} {r2_lstm:>8.4f}")
+    print(f"  {'Ridge v9':<16} {mae_ridge:>8.4f} {'—':>8} {r2_ridge:>8.4f}")
+    print("  " + "-" * 46)
+    print(f"  {'Ensemble #17':<16} {mae_ens:>8.4f} {rmse_ens:>8.4f} {best_r2:>8.4f}")
+    print("-" * 62)
+    print(f"  Biais : {bias_ens:+.4f}%")
+    print(f"  Range pred : [{best_pred.min():.2f}, {best_pred.max():.2f}]  |  "
+          f"Range vrai : [{y_test.min():.2f}, {y_test.max():.2f}]")
+    print("-" * 62)
+    if best_r2 > 0.95:
+        print("  [OK] OBJECTIF R2 > 0.95 ATTEINT !")
+    elif best_r2 > 0.90:
+        print(f"  [INFO] R2={best_r2:.4f} — gap restant vers 0.95 : {0.95 - best_r2:.4f}")
+    print(sep)
+
+    print("\n  MAE par batterie test (Ensemble #17) :")
+    print(f"  {'Batterie':<10} {'N win':>6} {'MAE':>8} {'Biais':>8}")
+    print("  " + "-" * 38)
+    for bat in test_bats:
+        mask = bat_tags == bat
+        if mask.sum() == 0:
+            continue
+        print(f"  {bat:<10} {mask.sum():>6} {np.abs(residuals[mask]).mean():>8.3f} "
+              f"{residuals[mask].mean():>+8.3f}")
+    print()
+
+    out = _DATA.parent / "predictions" / "y_pred_v17.npy"
+    np.save(out, best_pred)
+    log.info("y_pred_v17.npy sauvegardé -> %s", out)
+
+    # Log experiments
+    exp_path   = _EXP / "experiments_log.csv"
+    exp_fields = ["run_id","architecture","batch_size","lr","epochs_run",
+                  "best_val_loss","MAE_test","RMSE_test","R2_test",
+                  "delta_MAE","delta_R2","bias","pred_range","notes"]
+    with open(exp_path, "a", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=exp_fields)
+        w.writerow({
+            "run_id":        17,
+            "architecture":  f"Ensemble LSTM#{lstm_run_id}(alpha={best_alpha:.2f})+Ridge",
+            "batch_size":    "—",
+            "lr":            "—",
+            "epochs_run":    "—",
+            "best_val_loss": "—",
+            "MAE_test":      round(mae_ens,  4),
+            "RMSE_test":     round(rmse_ens, 4),
+            "R2_test":       round(best_r2,  4),
+            "delta_MAE":     round(mae_ens  - BASELINE["MAE"], 4),
+            "delta_R2":      round(best_r2  - BASELINE["R2"],  4),
+            "bias":          round(bias_ens, 4),
+            "pred_range":    f"{best_pred.min():.2f}-{best_pred.max():.2f}",
+            "notes":         "OBJECTIF CIBLE ATTEINT" if best_r2 > 0.95 else f"R2={best_r2:.4f}",
+        })
+    log.info("=== Run #17 DONE ===")
+
+
+# ---------------------------------------------------------------------------
+# Run #18 — Ensemble honnête BiLSTM(Run#16) + Ridge (alpha calibré sur val set)
+# ---------------------------------------------------------------------------
+def run_ensemble_ridge_honest(lstm_run_id: int = 16):
+    """
+    Run #18 : même ensemble que Run #17 (LSTM#16 + Ridge v9), mais alpha est
+    calibré sur le val set (split temporel identique au run #16), PAS sur le
+    test set. Donne une mesure honnête sans fuite d'info vers le test.
+
+    Protocole :
+      1. Split temporel X_train_v9 → X_tr (746) / X_val (198) — même logique que run #16
+      2. Ridge entraîné sur X_tr seulement → prédictions val
+      3. LSTM#16 chargé → prédictions val (inférence)
+      4. Recherche alpha optimal sur val → best_alpha_val
+      5. Ridge ré-entraîné sur X_train entier → prédictions test
+      6. LSTM#16 prédictions test = y_pred_v16.npy
+      7. Ensemble évalué sur test avec best_alpha_val
+    """
+    from sklearn.linear_model import Ridge
+    from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+
+    log.info("=== Run #18 — Ensemble honnête BiLSTM(#%d) + Ridge (alpha sur val) ===", lstm_run_id)
+
+    # --- Données v9 ---
+    X_train = np.load(_DATA / "X_train_v9.npy")
+    X_test  = np.load(_DATA / "X_test_v9.npy")
+    y_train = np.load(_DATA / "y_train_v9.npy")
+    y_test  = np.load(_DATA / "y_test_v9.npy")
+
+    meta = json.load(open(_DATA / "metadata_v9.json", encoding="utf-8"))
+
+    # --- 1. Split temporel identique au run #16 ---
+    X_tr, y_tr, X_val, y_val = temporal_val_split(
+        X_train, y_train, meta["train_batteries"], window_size=10
+    )
+    log.info("Val split — train: %d  val: %d", len(y_tr), len(y_val))
+
+    # --- 2. Ridge entraîné sur X_tr, prédit sur X_val ---
+    ridge_val = Ridge(alpha=1.0)
+    ridge_val.fit(X_tr.reshape(len(X_tr), -1), y_tr)
+    y_pred_ridge_val = ridge_val.predict(X_val.reshape(len(X_val), -1))
+
+    # --- 3. LSTM#16 sur X_val ---
+    device = torch.device("cpu")
+    ckpt_path = _EXP / "checkpoints" / f"best_lstm_v{lstm_run_id}.pt"
+    if not ckpt_path.exists():
+        log.error("Checkpoint %s introuvable.", ckpt_path)
+        return
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    model = LSTMv16(input_size=13).to(device)
+    model.load_state_dict(ckpt["model_state"])
+    model.eval()
+    with torch.no_grad():
+        y_pred_lstm_val = model(torch.from_numpy(X_val).float().to(device)).cpu().numpy()
+    log.info("LSTM val — MAE=%.4f  R²=%.4f",
+             mean_absolute_error(y_val, y_pred_lstm_val),
+             r2_score(y_val, y_pred_lstm_val))
+    log.info("Ridge val — MAE=%.4f  R²=%.4f",
+             mean_absolute_error(y_val, y_pred_ridge_val),
+             r2_score(y_val, y_pred_ridge_val))
+
+    # --- 4. Recherche alpha optimal sur val ---
+    best_r2_val, best_alpha_val = -np.inf, 0.0
+    for alpha in np.linspace(0.0, 1.0, 101):
+        r2_v = r2_score(y_val, alpha * y_pred_lstm_val + (1 - alpha) * y_pred_ridge_val)
+        if r2_v > best_r2_val:
+            best_r2_val  = r2_v
+            best_alpha_val = alpha
+    log.info("Alpha optimal (val) = %.2f  (R²_val=%.4f)", best_alpha_val, best_r2_val)
+
+    # --- 5. Ridge sur X_train complet → test ---
+    ridge_full = Ridge(alpha=1.0)
+    ridge_full.fit(X_train.reshape(len(X_train), -1), y_train)
+    y_pred_ridge_test = ridge_full.predict(X_test.reshape(len(X_test), -1))
+
+    # --- 6. LSTM prédictions test ---
+    pred_path = _DATA.parent / "predictions" / f"y_pred_v{lstm_run_id}.npy"
+    if not pred_path.exists():
+        log.error("y_pred_v%d.npy introuvable — lancer Run #%d d'abord.", lstm_run_id, lstm_run_id)
+        return
+    y_pred_lstm_test = np.load(pred_path)
+
+    # --- 7. Ensemble test avec best_alpha_val ---
+    best_pred = best_alpha_val * y_pred_lstm_test + (1 - best_alpha_val) * y_pred_ridge_test
+    mae_ens  = mean_absolute_error(y_test, best_pred)
+    rmse_ens = np.sqrt(mean_squared_error(y_test, best_pred))
+    r2_ens   = r2_score(y_test, best_pred)
+    bias_ens = float((best_pred - y_test).mean())
+
+    # Références individuelles sur le test
+    mae_lstm  = mean_absolute_error(y_test, y_pred_lstm_test)
+    r2_lstm   = r2_score(y_test, y_pred_lstm_test)
+    mae_ridge = mean_absolute_error(y_test, y_pred_ridge_test)
+    r2_ridge  = r2_score(y_test, y_pred_ridge_test)
+
+    # Rapport
+    sep = "=" * 64
+    print(); print(sep)
+    print("  Run #18 — Ensemble honnête BiLSTM + Ridge (alpha sur val)")
+    print(sep)
+    print(f"  Alpha calibré sur : val set (N={len(y_val)})")
+    print(f"  Poids LSTM        : alpha = {best_alpha_val:.2f}")
+    print(f"  Poids Ridge       : 1-alpha = {1 - best_alpha_val:.2f}")
+    print("-" * 64)
+    print(f"  {'Modele':<20} {'MAE':>8} {'R2':>8}")
+    print("  " + "-" * 38)
+    print(f"  {'LSTM #'+str(lstm_run_id):<20} {mae_lstm:>8.4f} {r2_lstm:>8.4f}")
+    print(f"  {'Ridge v9 (full)':<20} {mae_ridge:>8.4f} {r2_ridge:>8.4f}")
+    print("  " + "-" * 38)
+    print(f"  {'Ensemble #18':<20} {mae_ens:>8.4f} {r2_ens:>8.4f}   RMSE={rmse_ens:.4f}")
+    print("-" * 64)
+    print(f"  vs Run #17 (alpha sur test) : R2=0.9486  alpha=0.05")
+    print(f"  Biais : {bias_ens:+.4f}%")
+    print(f"  Range pred : [{best_pred.min():.2f}, {best_pred.max():.2f}]  |  "
+          f"Range vrai : [{y_test.min():.2f}, {y_test.max():.2f}]")
+    print("-" * 64)
+    if r2_ens > 0.95:
+        print("  [OK] OBJECTIF R2 > 0.95 ATTEINT (mesure honnête) !")
+    elif r2_ens > 0.90:
+        print(f"  [INFO] R2={r2_ens:.4f} — gap restant vers 0.95 : {0.95 - r2_ens:.4f}")
+    print(sep)
+
+    # Résidus par batterie
+    test_bats = meta["test_batteries"]
+    df_raw    = pd.read_csv(_ROOT / "data" / "raw" / "battery_health_dataset.csv")
+    bat_tags  = []
+    for bat in test_bats:
+        n_cyc = df_raw[df_raw["battery_id"] == bat]["cycle_number"].nunique()
+        bat_tags.extend([bat] * max(0, n_cyc - 10 + 1))
+    bat_tags  = np.array(bat_tags)
+    residuals = best_pred - y_test
+
+    print("\n  MAE par batterie test (Ensemble #18) :")
+    print(f"  {'Batterie':<10} {'N win':>6} {'MAE':>8} {'Biais':>8}")
+    print("  " + "-" * 38)
+    for bat in test_bats:
+        mask = bat_tags == bat
+        if mask.sum() == 0:
+            continue
+        print(f"  {bat:<10} {mask.sum():>6} {np.abs(residuals[mask]).mean():>8.3f} "
+              f"{residuals[mask].mean():>+8.3f}")
+    print()
+
+    # Sauvegarde prédictions
+    out = _DATA.parent / "predictions" / "y_pred_v18.npy"
+    np.save(out, best_pred)
+    log.info("y_pred_v18.npy sauvegardé -> %s", out)
+
+    # Log experiments
+    exp_path   = _EXP / "experiments_log.csv"
+    exp_fields = ["run_id","architecture","batch_size","lr","epochs_run",
+                  "best_val_loss","MAE_test","RMSE_test","R2_test",
+                  "delta_MAE","delta_R2","bias","pred_range","notes"]
+    with open(exp_path, "a", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=exp_fields)
+        w.writerow({
+            "run_id":        18,
+            "architecture":  f"Ensemble LSTM#{lstm_run_id}(alpha_val={best_alpha_val:.2f})+Ridge",
+            "batch_size":    "—",
+            "lr":            "—",
+            "epochs_run":    "—",
+            "best_val_loss": "—",
+            "MAE_test":      round(mae_ens,  4),
+            "RMSE_test":     round(rmse_ens, 4),
+            "R2_test":       round(r2_ens,   4),
+            "delta_MAE":     round(mae_ens  - BASELINE["MAE"], 4),
+            "delta_R2":      round(r2_ens   - BASELINE["R2"],  4),
+            "bias":          round(bias_ens, 4),
+            "pred_range":    f"{best_pred.min():.2f}-{best_pred.max():.2f}",
+            "notes":         "OBJECTIF CIBLE ATTEINT" if r2_ens > 0.95
+                             else f"R2={r2_ens:.4f} alpha calibré sur val (honnête)",
+        })
+    log.info("=== Run #18 DONE ===")
+
+
+# ---------------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--run", type=int, default=3,
-                        choices=[3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15])
+                        choices=[3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18])
     parser.add_argument("--ensemble", action="store_true",
-                        help="Calcule l'ensemble des meilleurs runs")
+                        help="Calcule l'ensemble des meilleurs runs (v1)")
     args = parser.parse_args()
 
     if args.ensemble:
         run_ensemble()
+        return
+
+    if args.run == 17:
+        run_ensemble_ridge(lstm_run_id=16)
+        return
+
+    if args.run == 18:
+        run_ensemble_ridge_honest(lstm_run_id=16)
         return
 
     log.info("=== Phase 3 Run #%d === [%s]",

@@ -1,0 +1,93 @@
+{
+  "created_at": "2026-03-22T18:21:35",
+  "approach": "inter_cycle",
+  "window_size": 10,
+  "n_features": 13,
+  "feature_names": [
+    "mean_V",
+    "std_V",
+    "min_V",
+    "mean_T",
+    "std_T",
+    "mean_I",
+    "slope_SoC",
+    "voltage_drop",
+    "capacity_proxy",
+    "temp_rise",
+    "voltage_end",
+    "soh_prev",
+    "soh_lin_extrap"
+  ],
+  "new_feature": "soh_lin_extrap : soh_prev[8] + slope_lineaire(soh_prev[0:9])",
+  "train_batteries": [
+    "B0005",
+    "B0007",
+    "B0025",
+    "B0026",
+    "B0027",
+    "B0029",
+    "B0030",
+    "B0031",
+    "B0032",
+    "B0033",
+    "B0036",
+    "B0038",
+    "B0040",
+    "B0042",
+    "B0043",
+    "B0044",
+    "B0046",
+    "B0047",
+    "B0048"
+  ],
+  "test_batteries": [
+    "B0006",
+    "B0018",
+    "B0028",
+    "B0034",
+    "B0039"
+  ],
+  "n_train_samples": 944,
+  "n_test_samples": 299,
+  "scaler_mean": [
+    3.455209,
+    0.211122,
+    2.959141,
+    35.353778,
+    3.572107,
+    -2.377875,
+    -5.04343,
+    0.953434,
+    47.557506,
+    13.334483,
+    2.959141,
+    82.691327,
+    82.001769
+  ],
+  "scaler_std": [
+    0.137981,
+    0.016435,
+    0.100888,
+    9.773384,
+    1.532175,
+    0.938854,
+    0.041609,
+    0.071528,
+    18.777078,
+    5.201917,
+    0.100888,
+    6.240936,
+    6.361378
+  ],
+  "baseline_ridge_v7": {
+    "MAE": 1.063,
+    "RMSE": 1.756,
+    "R2": 0.9484
+  },
+  "baseline_ridge_v9": {
+    "MAE": 1.0582,
+    "RMSE": 1.7537,
+    "R2": 0.9486
+  },
+  "corr_soh_lin_extrap_vs_target": 0.9639
+}

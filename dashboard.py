@@ -25,6 +25,7 @@ import plotly.graph_objects as go
 import streamlit as st
 import torch
 import torch.nn as nn
+from sklearn.linear_model import Ridge
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.preprocessing import StandardScaler
 
@@ -43,8 +44,9 @@ ARCH_DESC      = CFG["model"]["architecture"]
 N_PARAMS       = CFG["model"]["n_params"]
 WINDOW_SIZE    = CFG["features"]["window_size"]
 N_FEATURES     = CFG["features"]["n_features"]
-ALL_FEATURES   = CFG["features"]["feature_names"]          # 12 features (incl. soh_prev)
-ELEC_FEATURES  = ALL_FEATURES[:-1]                         # 11 features électriques
+ALL_FEATURES   = CFG["features"]["feature_names"]          # 13 features (incl. soh_prev + soh_lin_extrap)
+ELEC_FEATURES  = ALL_FEATURES[:11]                         # 11 features électriques
+ENSEMBLE_ALPHA = CFG["ensemble"]["alpha_lstm"]             # 0.05
 TRAIN_BATTERIES = CFG["data_split"]["train_batteries"]
 TEST_BATTERIES  = CFG["data_split"]["test_batteries"]
 BASELINE        = {
@@ -76,7 +78,7 @@ class AdditiveAttention(nn.Module):
 
 
 class BiLSTMAttention(nn.Module):
-    def __init__(self, input_size=12, hidden=64):
+    def __init__(self, input_size=13, hidden=64):
         super().__init__()
         self.lstm      = nn.LSTM(input_size, hidden, batch_first=True, bidirectional=True)
         self.attention = AdditiveAttention(hidden * 2)
@@ -143,9 +145,17 @@ def build_windows(cycle_df: pd.DataFrame, batteries: list):
             end      = start + WINDOW_SIZE
             elec_w   = elec[start:end]
             soh_w    = soh[start:end]
+            # soh_prev : décalé de 1 au dernier timestep (pas de leakage)
             soh_prev = soh_w.copy()
-            soh_prev[-1] = soh_w[-2]            # pas de leakage au dernier timestep
-            window = np.concatenate([elec_w, soh_prev.reshape(-1, 1)], axis=1)
+            soh_prev[-1] = soh_w[-2]
+            # soh_lin_extrap : régression linéaire sur les 9 valeurs connues
+            slope_val  = np.polyfit(np.arange(9, dtype=np.float64),
+                                    soh_prev[:9].astype(np.float64), 1)[0]
+            extrap_val = float(soh_prev[8] + slope_val)
+            extrap_col = np.full((WINDOW_SIZE, 1), extrap_val, dtype=np.float32)
+            window = np.concatenate([elec_w,
+                                     soh_prev.reshape(-1, 1),
+                                     extrap_col], axis=1)   # (10, 13)
             X_list.append(window)
             y_list.append(soh_w[-1])
             bat_tags.append(bat)
@@ -155,28 +165,37 @@ def build_windows(cycle_df: pd.DataFrame, batteries: list):
 
 
 def predict_window(cycle_df: pd.DataFrame, bat: str, start_idx: int,
-                   scaler: StandardScaler, model: nn.Module) -> tuple:
+                   scaler: StandardScaler, model: nn.Module,
+                   ridge: Ridge) -> tuple:
     """
     Prédit le SoH au cycle (start_idx + WINDOW_SIZE) pour une batterie donnée.
     Retourne (soh_pred, soh_true, window_cycles, target_cycle, elec_w, soh_w, soh_prev).
+    soh_pred = ensemble LSTM*alpha + Ridge*(1-alpha).
     """
     bat_cyc = (cycle_df[cycle_df["battery_id"] == bat]
                .sort_values("cycle_number").reset_index(drop=True))
-    elec = bat_cyc[ELEC_FEATURES].values
-    soh  = bat_cyc["SoH"].values
+    elec   = bat_cyc[ELEC_FEATURES].values
+    soh    = bat_cyc["SoH"].values
     cycles = bat_cyc["cycle_number"].values
 
     elec_w   = elec[start_idx : start_idx + WINDOW_SIZE]
     soh_w    = soh[start_idx  : start_idx + WINDOW_SIZE]
     soh_prev = soh_w.copy()
     soh_prev[-1] = soh_w[-2]
+    slope_val  = np.polyfit(np.arange(9, dtype=np.float64),
+                            soh_prev[:9].astype(np.float64), 1)[0]
+    extrap_val = float(soh_prev[8] + slope_val)
+    extrap_col = np.full((WINDOW_SIZE, 1), extrap_val, dtype=np.float32)
 
-    window   = np.concatenate([elec_w, soh_prev.reshape(-1, 1)], axis=1)
+    window   = np.concatenate([elec_w, soh_prev.reshape(-1, 1), extrap_col], axis=1)  # (10,13)
     F        = window.shape[1]
     window_s = scaler.transform(window.reshape(-1, F)).reshape(1, WINDOW_SIZE, F).astype(np.float32)
 
     with torch.no_grad():
-        soh_pred = model(torch.FloatTensor(window_s).to(DEVICE)).cpu().item()
+        soh_lstm = model(torch.FloatTensor(window_s).to(DEVICE)).cpu().item()
+
+    soh_ridge = float(ridge.predict(window_s.reshape(1, -1))[0])
+    soh_pred  = ENSEMBLE_ALPHA * soh_lstm + (1 - ENSEMBLE_ALPHA) * soh_ridge
 
     soh_true      = float(soh[start_idx + WINDOW_SIZE])
     window_cycles = cycles[start_idx : start_idx + WINDOW_SIZE].tolist()
@@ -222,11 +241,19 @@ def load_log():
     return None
 
 
+@st.cache_resource
+def fit_ridge(_X_train, _y_train):
+    ridge = Ridge(alpha=1.0)
+    ridge.fit(_X_train.reshape(len(_X_train), -1), _y_train)
+    return ridge
+
+
 @st.cache_data
-def get_predictions(_model, X_test):
+def get_predictions(_model, _ridge, X_test):
     with torch.no_grad():
-        y_pred = _model(torch.FloatTensor(X_test).to(DEVICE)).cpu().numpy()
-    return y_pred
+        y_lstm = _model(torch.FloatTensor(X_test).to(DEVICE)).cpu().numpy()
+    y_ridge = _ridge.predict(X_test.reshape(len(X_test), -1))
+    return ENSEMBLE_ALPHA * y_lstm + (1 - ENSEMBLE_ALPHA) * y_ridge
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -251,8 +278,9 @@ if not CHECKPOINT.exists():
 with st.spinner("Chargement des données et du modèle..."):
     df, cycle_df, X_train, y_train, X_test, y_test, bat_tags, scaler = load_data()
     model, ckpt = load_model()
+    ridge       = fit_ridge(X_train, y_train)
     log_df      = load_log()
-    y_pred      = get_predictions(model, X_test)
+    y_pred      = get_predictions(model, ridge, X_test)
     bat_tags_arr = np.array(bat_tags)
 
 mae_global  = mean_absolute_error(y_test, y_pred)
@@ -265,7 +293,7 @@ residuals   = y_pred - y_test
 # Header
 # ─────────────────────────────────────────────────────────────────────────────
 st.title("🔋 Battery State of Health — Dashboard")
-st.caption(f"Run #{RUN_ID} | {ARCH_DESC} | {N_FEATURES} features (soh_prev) | Battery-wise split")
+st.caption(f"Run #{RUN_ID} + Ridge ensemble (α={ENSEMBLE_ALPHA}) | {N_FEATURES} features (soh_prev + soh_lin_extrap) | Battery-wise split")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Sidebar
@@ -284,7 +312,7 @@ with st.sidebar:
     st.markdown(f"**Run** : #{RUN_ID}")
     st.markdown(f"**Architecture** : `{ARCH_DESC}`")
     st.markdown(f"**Paramètres** : {N_PARAMS:,}")
-    st.markdown(f"**Features** : {N_FEATURES} (`soh_prev` inclus)")
+    st.markdown(f"**Features** : {N_FEATURES} (`soh_prev` + `soh_lin_extrap`)")
     st.markdown(f"**Device** : `{DEVICE}`")
     st.markdown(f"**Train** : {len(TRAIN_BATTERIES)} batteries · {len(y_train)} fenêtres")
     st.markdown(f"**Test**  : {len(TEST_BATTERIES)} batteries · {len(y_test)} fenêtres")
@@ -562,7 +590,7 @@ elif page == "🎯 Prédiction interactive":
                               help=f"La fenêtre couvre les {WINDOW_SIZE} cycles à partir de cet index.")
 
         soh_pred, soh_true, window_cycles, target_cycle, elec_w, soh_w, soh_prev = \
-            predict_window(cycle_df, bat_choice, start_idx, scaler, model)
+            predict_window(cycle_df, bat_choice, start_idx, scaler, model, ridge)
 
         err = abs(soh_pred - soh_true)
 
